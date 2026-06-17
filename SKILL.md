@@ -57,6 +57,14 @@
 | `simone-api` | `172.20.0.3` | `8080` | Simone API (Python) |
 | `simone-worker` | `172.20.0.4` | — | Simone background worker |
 
+### 1.3a Standalone containers (Docker bridge, not haus-netzwerk)
+
+| Container | Network | Host Port | Purpose |
+|---|---|---|---|
+| `uptime-kuma` | `bridge` (`172.17.0.x`) | `3001` | Self-hosted monitoring (see §9.5) |
+| `opensin-app` | `bridge` | `38471` | OpenSIN-Chat (see §8) |
+| `n8n-n8n-1` | `bridge` | `5678` | n8n workflow automation |
+
 ### 1.4 Resource usage (live snapshot)
 
 | Container | CPU | Memory |
@@ -468,6 +476,73 @@ PGVECTOR_TABLE_NAME=opensin_vectors
 
 ---
 
+## 9.5 Uptime Kuma — Self-hosted Monitoring
+
+**Was ist Uptime Kuma?** Self-hosted Monitoring-Tool (Alternative zu UptimeRobot). Pingt URLs in konfigurierbaren Intervallen, zeigt Status mit Historie, misst Antwortzeiten/Verfügbarkeit, schickt Alerts bei Downtime, bietet öffentliche Status-Seiten.
+
+**Deployment auf sin-supabase (gleiche VM):**
+
+| Property | Wert |
+|---|---|
+| Container | `uptime-kuma` (Docker bridge, NOT haus-netzwerk) |
+| Image | `louislam/uptime-kuma:1` |
+| Port | `3001` (host) → `3001` (container) |
+| Public URL | `https://status.delqhi.com` (via `simone-api` Cloudflare tunnel) |
+| DB | SQLite: `/app/data/kuma.db` (inside container) |
+| Login | admin / admin (ändern!) |
+| Docker network | `bridge` (`172.17.0.x`) — NOT `haus-netzwerk` |
+
+**⚠️ WICHTIG — Cloudflare Bot-Schutz:**
+Uptime Kuma nutzt intern curl/Node.js HTTP client, dessen User-Agent von Cloudflare blockiert wird (502 Bad Gateway). Lösung: Monitor-Header auf Browser-User-Agent setzen:
+
+```bash
+ssh sin-supabase 'docker exec uptime-kuma sqlite3 /app/data/kuma.db \
+  "UPDATE monitor SET headers='\''{\"User-Agent\":\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"}'\'', ignore_tls=1 WHERE name LIKE '\''%sinchat%'\'';"'
+```
+
+**Monitore (Stand 2026-06-17):**
+
+| ID | Name | Type | Target | Interval | Notes |
+|---|---|---|---|---|---|
+| 1 | sinchat.delqhi.com | HTTP | `https://sinchat.delqhi.com` | 60s | Braucht Browser-User-Agent Header |
+
+**Typische Operationen:**
+
+```bash
+# Status prüfen
+ssh sin-supabase 'docker ps | grep uptime-kuma'
+ssh sin-supabase 'docker exec uptime-kuma sqlite3 /app/data/kuma.db "SELECT id, name, type, url, active FROM monitor;"'
+
+# Monitor hinzufügen (HTTP, mit Browser-UA für Cloudflare)
+ssh sin-supabase 'docker exec uptime-kuma sqlite3 /app/data/kuma.db \
+  "INSERT INTO monitor (name, type, interval, url, hostname, port, active, maxretries, user_id, headers, ignore_tls) \
+   VALUES ('\''mein-service'\'', '\''http'\'', 60, '\''https://example.com'\'', '\''example.com'\'', 443, 1, 0, 1, \
+   '\''{\"User-Agent\":\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\"}'\'', 1);"'
+
+# Monitor hinzufügen (TCP — für interne Services ohne Cloudflare)
+ssh sin-supabase 'docker exec uptime-kuma sqlite3 /app/data/kuma.db \
+  "INSERT INTO monitor (name, type, interval, hostname, port, active, maxretries, user_id) \
+   VALUES ('\''sinchat-container-tcp'\'', '\''tcp'\'', 60, '\''172.17.0.1'\'', 38471, 1, 0, 1);"'
+
+# Monitor löschen
+ssh sin-supabase 'docker exec uptime-kuma sqlite3 /app/data/kuma.db "DELETE FROM monitor WHERE id=<ID>;"'
+
+# DB backup
+ssh sin-supabase 'docker cp uptime-kuma:/app/data/kuma.db /tmp/kuma-backup-$(date +%Y%m%d).db'
+
+# Restart
+ssh sin-supabase 'docker restart uptime-kuma'
+```
+
+**Status-Seite erstellen (manuell, keine REST API):**
+1. Login `https://status.delqhi.com` (admin/admin)
+2. "Status-Seiten" → "Neue Status-Seite" → Monitore auswählen → "Publish"
+
+**Integration mit Watchdog-Stack:**
+Uptime Kuma = Monitoring-Ebene (Visualisierung + Alerts). Systemd-Timer = Recovery-Ebene (automatische Reparatur). Beide zusammen = vollständige Resilienz. Uptime Kuma ersetzt NICHT die systemd-Timer (`cloudflared-watchdog`, `sinchat-healthcheck`, `sinchat-external-monitor`).
+
+---
+
 ## 10. Cross-References
 
 | Resource | Location |
@@ -488,3 +563,4 @@ PGVECTOR_TABLE_NAME=opensin_vectors
 | Date | Change |
 |---|---|
 | 2026-06-17 | Skill created — full live inventory, 13 containers, Postgres 15.8, Kong routes, .env keys, A2A runtime, recovery playbooks |
+| 2026-06-17 | Added §9.5 Uptime Kuma + §1.3a standalone containers (uptime-kuma, opensin-app, n8n) |
