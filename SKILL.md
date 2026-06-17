@@ -492,19 +492,41 @@ PGVECTOR_TABLE_NAME=opensin_vectors
 | Login | admin / admin (ändern!) |
 | Docker network | `bridge` (`172.17.0.x`) — NOT `haus-netzwerk` |
 
-**⚠️ WICHTIG — Cloudflare Bot-Schutz:**
-Uptime Kuma nutzt intern curl/Node.js HTTP client, dessen User-Agent von Cloudflare blockiert wird (502 Bad Gateway). Lösung: Monitor-Header auf Browser-User-Agent setzen:
+**⚠️ WICHTIG — Cloudflare Bot-Schutz (2 Lösungswege):**
+
+**Lösung A (BEVORZUGT): Direkte Container-IP über Docker-Netzwerk**
+Kuma kann nicht zuverlässig durch Cloudflare prüfen (Bot-Schutz blockt auch mit Browser-UA). Stattdessen: Kuma-Container mit dem Ziel-Netzwerk verbinden und direkt prüfen:
+
+```bash
+# 1. Kuma mit dem opensin-chat Netzwerk verbinden
+ssh sin-supabase 'docker network connect opensin_opensin-chat uptime-kuma'
+
+# 2. Container-IP von opensin-app finden
+ssh sin-supabase 'docker inspect opensin-app --format "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}"'
+# → z.B. 172.22.0.2
+
+# 3. Monitor auf direkte IP umstellen
+ssh sin-supabase 'docker exec uptime-kuma sqlite3 /app/data/kuma.db \
+  "UPDATE monitor SET url='\''http://172.22.0.2:3001'\'', hostname='\''172.22.0.2'\'', port=3001, ignore_tls=1 WHERE id=1;"'
+
+# 4. Kuma neu starten (lädt Monitor-Config neu)
+ssh sin-supabase 'docker restart uptime-kuma'
+```
+
+**Lösung B (FALLBACK): Browser-User-Agent Header (unzuverlässig!)**
+Funktioniert manchmal, aber Kuma cached die Monitor-Config im RAM und DB-Header werden nach Restart nicht immer übernommen:
 
 ```bash
 ssh sin-supabase 'docker exec uptime-kuma sqlite3 /app/data/kuma.db \
-  "UPDATE monitor SET headers='\''{\"User-Agent\":\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"}'\'', ignore_tls=1 WHERE name LIKE '\''%sinchat%'\'';"'
+  "UPDATE monitor SET headers='\''{\"User-Agent\":\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"}'\'', ignore_tls=1 WHERE id=1;"'
+ssh sin-supabase 'docker restart uptime-kuma'
 ```
 
 **Monitore (Stand 2026-06-17):**
 
 | ID | Name | Type | Target | Interval | Notes |
 |---|---|---|---|---|---|
-| 1 | sinchat.delqhi.com | HTTP | `https://sinchat.delqhi.com` | 60s | Braucht Browser-User-Agent Header |
+| 1 | sinchat.delqhi.com | HTTP | `http://172.22.0.2:3001` (direct container IP) | 60s | Via Docker network `opensin_opensin-chat`, bypasses Cloudflare |
 
 **Typische Operationen:**
 
@@ -564,3 +586,4 @@ Uptime Kuma = Monitoring-Ebene (Visualisierung + Alerts). Systemd-Timer = Recove
 |---|---|
 | 2026-06-17 | Skill created — full live inventory, 13 containers, Postgres 15.8, Kong routes, .env keys, A2A runtime, recovery playbooks |
 | 2026-06-17 | Added §9.5 Uptime Kuma + §1.3a standalone containers (uptime-kuma, opensin-app, n8n) |
+| 2026-06-17 | Updated §9.5: Cloudflare bypass via Docker network (Lösung A) statt unzuverlässigem Browser-UA (Lösung B) |
